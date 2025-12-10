@@ -51,6 +51,10 @@ def bidding_strategy(
 """
         return base_code + body
 
+    def generate_text(self, prompt: str) -> str:
+        """Mock text generation."""
+        return "Mock analysis: The strategy is aggressive but runs out of budget too fast. Suggest lowering bids in low conversion periods."
+
     def analyze_strategies(self, strategies_data: List[Dict[str, Any]]) -> str:
         return "Mock Analysis: Aggressive strategies performed best in high conversion segments."
 
@@ -64,6 +68,13 @@ class OllamaLLMClient(ILLMClient):
         except ImportError:
             self.client = None
         self.model = model
+
+    def generate_text(self, prompt: str) -> str:
+        if not self.client:
+            raise RuntimeError("Ollama library not installed.")
+        
+        response = self.client.generate(model=self.model, prompt=prompt)
+        return response['response']
 
     def generate_strategy_code(self, prompt: str) -> str:
         if not self.client:

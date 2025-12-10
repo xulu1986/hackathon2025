@@ -38,6 +38,35 @@ class StrategyGenerator:
         
         raise ValueError(f"Failed to generate valid strategy for {strategy_type.value} after {retries} attempts. Last error: {last_error}")
 
+    def analyze_and_optimize(self, strategy: StrategyMetadata, metrics: dict, retries: int = 3) -> tuple[str, StrategyMetadata]:
+        # 1. Analyze
+        analysis_prompt = PromptBuilder.build_analysis_prompt(strategy.code, metrics)
+        analysis = self.llm_client.generate_text(analysis_prompt)
+        
+        # 2. Optimize
+        optimize_prompt = PromptBuilder.build_optimization_prompt(strategy.code, analysis)
+        
+        last_error = None
+        for i in range(retries):
+            try:
+                code = self.llm_client.generate_strategy_code(optimize_prompt)
+                code = self._clean_code(code)
+                
+                if CodeValidator.validate(code):
+                     optimized_meta = StrategyMetadata(
+                        id=str(uuid.uuid4()),
+                        name=f"{strategy.name}_optimized",
+                        strategy_type="Optimized",
+                        code=code,
+                        created_at=time.time()
+                    )
+                     return analysis, optimized_meta
+            except Exception as e:
+                last_error = e
+                continue
+        
+        raise ValueError(f"Failed to optimize strategy after {retries} attempts. Last error: {last_error}")
+
     def _clean_code(self, text: str) -> str:
         """Removes markdown code fences if present."""
         if "```python" in text:

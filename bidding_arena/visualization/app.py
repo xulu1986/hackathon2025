@@ -3,14 +3,30 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import time
-from typing import List, Dict
+import uuid
+from typing import List, Dict, Any
 
 from bidding_arena.core.constants import StrategyType
+from bidding_arena.core.interfaces import StrategyMetadata
 from bidding_arena.core.strategy import DynamicStrategy
 from bidding_arena.core.engine import ReplayEngine
 from bidding_arena.generation.generator import StrategyGenerator
 from bidding_arena.generation.llm_client import MockLLMClient, OllamaLLMClient
+from bidding_arena.generation.validator import CodeValidator
 from bidding_arena.data.generator import MockDataGenerator
+
+DEFAULT_CUSTOM_STRATEGY = """def bidding_strategy(
+    initial_budget: float,
+    total_duration: int,
+    remaining_budget: float,
+    remaining_time: int,
+    winner_price_percentiles: dict,
+    conversion_rate: float
+) -> float:
+    import math
+    # Example: Bid fixed price
+    return 1.0
+"""
 
 def main():
     st.set_page_config(page_title="Bidding Strategy Arena", layout="wide")
@@ -19,47 +35,150 @@ def main():
     # Sidebar: Configuration
     st.sidebar.header("Configuration")
     
-    use_ollama = st.sidebar.checkbox("Use Real Ollama (Gemma3)", value=False)
+    use_ollama = st.sidebar.checkbox("Use Real Ollama (Gemma3)", value=True)
     model_name = st.sidebar.text_input("Model Name", value="gemma3:12b") if use_ollama else "mock"
     
     selected_types = st.sidebar.multiselect(
         "Select Strategy Types to Generate",
         [t.value for t in StrategyType],
-        default=[StrategyType.IMPRESSION_FOCUSED.value, StrategyType.AGGRESSIVE.value]
+        default=[t.value for t in StrategyType]
     )
 
-    initial_budget = st.sidebar.number_input("Initial Budget ($)", value=100.0)
-    num_records = st.sidebar.slider("Simulation Records", 100, 5000, 1000)
+    initial_budget = st.sidebar.number_input("Initial Budget ($)", value=100000.0)
+    # MODIFIED: Increase slider range to support larger simulations
+    num_records = st.sidebar.slider("Base Simulation Records", 1000, 100000, 10000)
 
+    # Custom Strategy Input (Sidebar)
+    with st.sidebar.expander("📝 Custom Strategy (Optional)", expanded=False):
+        custom_strategy_code = st.text_area(
+            "Paste Python Code", 
+            value=DEFAULT_CUSTOM_STRATEGY, 
+            height=300,
+            help="Define a 'bidding_strategy' function. Edit this to enable."
+        )
+
+    # Initialize Session State
+    if 'market_data' not in st.session_state:
+        st.session_state['market_data'] = None
+    if 'results' not in st.session_state:
+        st.session_state['results'] = []
+    if 'optimization_round' not in st.session_state:
+        st.session_state['optimization_round'] = 0
+    if 'analyses' not in st.session_state:
+        st.session_state['analyses'] = {} # round -> analysis_text
+
+    # Main Action Button
     if st.sidebar.button("🚀 Generate & Compete"):
-        run_arena(use_ollama, model_name, selected_types, initial_budget, num_records)
+        # Reset state
+        st.session_state['results'] = []
+        st.session_state['optimization_round'] = 0
+        st.session_state['analyses'] = {}
+        
+        # Run Initial Arena
+        # Pass custom_strategy_code even if it's default, process_custom_strategy handles validation if we want strictness,
+        # but here we only run if it's NOT default to avoid noise.
+        # Actually, let's allow running the default one if the user wants to test the "fixed price" baseline.
+        # But previous logic was: custom_strategy_code if custom_strategy_code != DEFAULT_CUSTOM_STRATEGY else None
+        
+        # Let's check if the code inside is functionally different or if the user intends to run it.
+        # For simplicity, we stick to the previous logic: only run if it's different from the placeholder.
+        # OR we can just run it if the expander is open? No way to detect that easily.
+        # Let's rely on the text content.
+        
+        code_to_run = custom_strategy_code if custom_strategy_code != DEFAULT_CUSTOM_STRATEGY else None
+        
+        run_initial_arena(
+            use_ollama, 
+            model_name, 
+            selected_types, 
+            initial_budget, 
+            num_records,
+            code_to_run
+        )
 
-def run_arena(use_ollama, model_name, selected_types, initial_budget, num_records):
-    # 1. Setup Clients
+    # Render Persistent Dashboard if results exist
+    if st.session_state['results']:
+        render_dashboard(use_ollama, model_name, initial_budget)
+
+def get_generator(use_ollama, model_name):
     if use_ollama:
         try:
             llm_client = OllamaLLMClient(model=model_name)
         except Exception as e:
             st.error(f"Failed to initialize Ollama: {e}")
-            return
+            return None, None
     else:
         llm_client = MockLLMClient()
+    return StrategyGenerator(llm_client), llm_client
+
+def generate_round_analysis(results, round_num, llm_client):
+    """Helper to generate and store analysis for a round."""
+    analysis_data = [{
+        "name": res['strategy_name'],
+        "win_rate": f"{res['win_rate']:.2%}",
+        "cpa": f"${res['avg_cpa']:.2f}"
+    } for res in results]
     
-    generator = StrategyGenerator(llm_client)
-    
-    # 2. Data Generation
+    try:
+        analysis_text = llm_client.analyze_strategies(analysis_data)
+        st.session_state['analyses'][round_num] = analysis_text
+        return True
+    except Exception as e:
+        st.error(f"Analysis failed: {e}")
+        return False
+
+def process_custom_strategy(code: str, budget: float, market_data: Any, round_num: int) -> Dict[str, Any]:
+    """Helper to process and run a custom strategy."""
+    if not CodeValidator.validate(code):
+        st.error("Custom strategy validation failed. Ensure it has 'bidding_strategy' function and uses only allowed imports (math).")
+        return None
+
+    try:
+        metadata = StrategyMetadata(
+            id=str(uuid.uuid4()),
+            name=f"User_Custom_Strategy_R{round_num}",
+            strategy_type="Custom",
+            code=code,
+            created_at=time.time()
+        )
+        strategy = DynamicStrategy(metadata)
+        engine = ReplayEngine(initial_budget=budget)
+        sim_result = engine.run(strategy, market_data)
+        
+        sim_result['strategy_name'] = f"User Custom (Round {round_num})"
+        sim_result['metadata'] = metadata
+        sim_result['round'] = round_num
+        return sim_result
+    except Exception as e:
+        st.error(f"Error running custom strategy: {e}")
+        return None
+
+def run_initial_arena(use_ollama, model_name, selected_types, initial_budget, num_records, custom_code=None):
+    generator, llm_client = get_generator(use_ollama, model_name)
+    if not generator: return
+
+    # 1. Data Generation
     with st.spinner("Generating Market Data..."):
         data_gen = MockDataGenerator()
-        market_data = data_gen.generate_data(num_records)
+        # MODIFIED: Pass 'initial_budget' to ensure data generation scales with budget
+        market_data = data_gen.generate_data(num_records, total_budget=initial_budget)
+        st.session_state['market_data'] = market_data
         st.success(f"Generated {len(market_data)} bid requests.")
         
         # Show data sample
         with st.expander("View Market Data Sample"):
             st.dataframe(market_data.head())
-
-    # 3. Strategy Generation & Execution
+        
+    # 2. Strategy Generation & Execution (Initial Round)
     results = []
     
+    # Run Custom Strategy if provided
+    if custom_code:
+        st.info("Running Custom Strategy...")
+        custom_result = process_custom_strategy(custom_code, initial_budget, market_data, 0)
+        if custom_result:
+            results.append(custom_result)
+
     progress_bar = st.progress(0)
     status_text = st.empty()
     
@@ -72,15 +191,13 @@ def run_arena(use_ollama, model_name, selected_types, initial_budget, num_record
             metadata = generator.generate(s_type)
             strategy = DynamicStrategy(metadata)
             
-            # Show Code
-            with st.expander(f"📜 Strategy Code: {s_type.value}"):
-                st.code(metadata.code, language="python")
-            
             # Run Simulation
             engine = ReplayEngine(initial_budget=initial_budget)
             sim_result = engine.run(strategy, market_data)
             
             sim_result['strategy_name'] = s_type.value
+            sim_result['metadata'] = metadata
+            sim_result['round'] = 0
             results.append(sim_result)
             
         except Exception as e:
@@ -88,32 +205,168 @@ def run_arena(use_ollama, model_name, selected_types, initial_budget, num_record
         
         progress_bar.progress((i + 1) / len(selected_types))
 
-    status_text.text("Competition finished!")
+    st.session_state['results'] = results
+    status_text.empty()
+
+    # NOTE: We do NOT generate analysis automatically here anymore.
+    # We just let it fall through to render_dashboard, where the user can manually trigger it.
+
+def render_dashboard(use_ollama, model_name, initial_budget):
+    all_results = st.session_state['results']
+    max_round = st.session_state['optimization_round']
     
-    if not results:
-        return
+    # Pre-calculate client to avoid multiple inits
+    generator, llm_client = get_generator(use_ollama, model_name)
+    
+    # Iterate through all rounds to display history sequentially
+    for r in range(max_round + 1):
+        round_results = [res for res in all_results if res.get('round', 0) == r]
+        
+        if not round_results:
+            continue
+            
+        st.divider()
+        st.markdown(f"## 🏁 Round {r} Results")
+        
+        # 1. Display Strategy Code for this round
+        with st.expander(f"View Round {r} Strategy Codes", expanded=False):
+            cols = st.columns(len(round_results))
+            for idx, res in enumerate(round_results):
+                with cols[idx % len(cols)]: # Wrap around if too many
+                    st.markdown(f"**{res['strategy_name']}**")
+                    st.code(res['metadata'].code, language="python")
 
-    # 4. Visualization
+        # 2. Display Round Metrics
+        display_round_metrics(round_results)
+        
+        # 3. AI Analysis Report (Manual Trigger)
+        if r in st.session_state['analyses']:
+            with st.expander(f"🧠 AI Analysis Report (Round {r})", expanded=True):
+                st.markdown(st.session_state['analyses'][r])
+        else:
+            # Manual Trigger Button
+            if st.button(f"📝 Generate Analysis Report (Round {r})", key=f"analyze_btn_{r}"):
+                 with st.spinner("Analyzing..."):
+                     if llm_client:
+                         if generate_round_analysis(round_results, r, llm_client):
+                             st.rerun()
+
+    # --- Global Summary Section ---
     st.divider()
-    st.subheader("🏆 Competition Results")
+    st.header("🏆 Global Leaderboard & Trends")
+    
+    # 4. Global Table
+    display_round_metrics(all_results)
+    
+    # 5. Global Charts (Cumulative)
+    display_global_charts(all_results)
+    
+    # 6. Optimization Control (Always at bottom)
+    st.divider()
+    st.subheader("🧬 AI Optimization Lab")
+    
+    next_round = max_round + 1
+    # Find results from the latest round to optimize
+    latest_results = [res for res in all_results if res.get('round', 0) == max_round]
+    
+    # Input for Custom Strategy in Next Round
+    with st.expander(f"📝 Inject Custom Strategy for Round {next_round} (Optional)", expanded=False):
+        next_round_custom_code = st.text_area(
+            "Paste Python Code", 
+            value=DEFAULT_CUSTOM_STRATEGY, 
+            height=300,
+            key=f"custom_code_round_{next_round}",
+            help="Define a 'bidding_strategy' function."
+        )
+    
+    if st.button(f"✨ Auto-Optimize All Round {max_round} Strategies (Start Round {next_round})"):
+        # Check if user modified the default template
+        custom_code_to_pass = next_round_custom_code if next_round_custom_code != DEFAULT_CUSTOM_STRATEGY else None
+        
+        perform_optimization(
+            use_ollama, 
+            model_name, 
+            initial_budget, 
+            latest_results, 
+            next_round,
+            custom_code_to_pass
+        )
+        st.rerun()
 
-    # Metrics Table
+def perform_optimization(use_ollama, model_name, initial_budget, source_results, round_num, custom_code=None):
+    generator, llm_client = get_generator(use_ollama, model_name)
+    market_data = st.session_state['market_data']
+    
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    new_results = []
+    
+    # 1. Run Custom Strategy if provided
+    if custom_code:
+        st.info("Running Injected Custom Strategy...")
+        custom_result = process_custom_strategy(custom_code, initial_budget, market_data, round_num)
+        if custom_result:
+            new_results.append(custom_result)
+    
+    # 2. Optimize Existing Strategies
+    for i, res in enumerate(source_results):
+        strategy_name = res['strategy_name']
+        status_text.text(f"Optimizing {strategy_name}...")
+        
+        # Prepare metrics
+        metrics_summary = {
+            "win_rate": f"{res['win_rate']:.2%}",
+            "avg_cpm": f"${res['avg_cpm']:.2f}",
+            "total_spend": f"${res['total_spend']:.2f}"
+        }
+        
+        try:
+            # Analyze & Optimize
+            _, new_meta = generator.analyze_and_optimize(res['metadata'], metrics_summary)
+            
+            # Run Simulation
+            opt_strategy = DynamicStrategy(new_meta)
+            engine = ReplayEngine(initial_budget=initial_budget)
+            opt_res = engine.run(opt_strategy, market_data)
+            
+            # Update Name
+            # Clean up previous round info from name if exists
+            base_name = strategy_name.split(" (Round")[0]
+            opt_res['strategy_name'] = f"{base_name} (Round {round_num})"
+            opt_res['metadata'] = new_meta
+            opt_res['round'] = round_num
+            
+            new_results.append(opt_res)
+            
+        except Exception as e:
+            st.error(f"Optimization failed for {strategy_name}: {e}")
+            
+        progress_bar.progress((i + 1) / len(source_results))
+    
+    # Append new results to session state
+    st.session_state['results'].extend(new_results)
+    st.session_state['optimization_round'] = round_num
+    
+    # Don't generate analysis automatically. Let render_dashboard handle it with manual trigger.
+    st.rerun()
+
+def display_round_metrics(results):
     metrics_df = pd.DataFrame([{
         "Strategy": r['strategy_name'],
+        "Round": r.get('round', 0),
         "Wins": r['win_count'],
         "Win Rate": f"{r['win_rate']:.2%}",
         "Spend": f"${r['total_spend']:.2f}",
         "Conversions": r['conversion_count'],
-        "CPA": f"${r['avg_cpa']:.2f}",
-        "ROI": f"{r['roi']:.2f}"
+        "CPA": f"${r['avg_cpa']:.2f}"
     } for r in results])
     
-    st.table(metrics_df)
+    st.table(metrics_df.sort_values(by="Conversions", ascending=False))
 
-    # Charts
+def display_global_charts(results):
     col1, col2 = st.columns(2)
     
-    # Prepare Time Series Data
     all_history = []
     for r in results:
         hist_df = pd.DataFrame(r['history'])
@@ -129,9 +382,10 @@ def run_arena(use_ollama, model_name, selected_types, initial_budget, num_record
             st.plotly_chart(fig_budget, use_container_width=True)
             
         with col2:
-            st.markdown("### 💰 Cumulative Spend vs Time")
-            fig_spend = px.line(full_hist, x="timestamp", y="total_spend", color="Strategy", markers=True)
-            st.plotly_chart(fig_spend, use_container_width=True)
+            st.markdown("### 🏷️ Moving Average Bid Price ($)")
+            fig_bid = px.line(full_hist, x="timestamp", y="avg_bid_price", color="Strategy", markers=True)
+            fig_bid.update_layout(yaxis_title="Avg Bid Price ($)")
+            st.plotly_chart(fig_bid, use_container_width=True)
             
         col3, col4 = st.columns(2)
         
@@ -142,14 +396,22 @@ def run_arena(use_ollama, model_name, selected_types, initial_budget, num_record
 
         with col4:
             st.markdown("### 📊 Win Rate & Conversion Efficiency")
-            # Bar chart for final metrics
+            # Calculate metrics for chart
+            chart_data = []
+            for r in results:
+                chart_data.append({
+                    "Strategy": r['strategy_name'],
+                    "Win Rate": r['win_rate'],
+                    "Conversions": r['conversion_count']
+                })
+            df_chart = pd.DataFrame(chart_data)
+            
             fig_bar = go.Figure(data=[
-                go.Bar(name='Win Rate', x=metrics_df['Strategy'], y=[float(x.strip('%'))/100 for x in metrics_df['Win Rate']]),
-                go.Bar(name='ROI', x=metrics_df['Strategy'], y=[float(x) for x in metrics_df['ROI']])
+                go.Bar(name='Win Rate', x=df_chart['Strategy'], y=df_chart['Win Rate']),
+                go.Bar(name='Conversions', x=df_chart['Strategy'], y=df_chart['Conversions'])
             ])
             fig_bar.update_layout(barmode='group')
             st.plotly_chart(fig_bar, use_container_width=True)
 
 if __name__ == "__main__":
     main()
-

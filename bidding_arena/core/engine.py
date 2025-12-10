@@ -37,6 +37,10 @@ class ReplayEngine(IReplayEngine):
         total_spend = 0.0
         bids_placed = 0
         
+        # New: Track moving average bid
+        interval_bid_sum = 0.0
+        interval_bid_count = 0
+        
         history: List[Dict[str, Any]] = []
 
         # Pre-calculate global stats for the strategy context (simplified for now)
@@ -65,28 +69,28 @@ class ReplayEngine(IReplayEngine):
             )
 
             # Execute Strategy
-            bid_price_cpm = strategy.bid(request)
+            bid_price = strategy.bid(request)
             bids_placed += 1
             
-            # CPM to Unit Price (assuming 1 impression)
-            # Usually CPM is per 1000, but let's treat bid_price as "price for this impression" 
-            # OR standard CPM logic: cost = bid / 1000? 
-            # The spec says "winner_price (CPM)". 
-            # Let's assume the auction happens in CPM dollars.
-            # But the cost is paid for 1 imp. 
-            # Standard: cost = price / 1000. 
-            # Let's stick to spec "bid (CPM)".
+            # Accumulate for moving average
+            interval_bid_sum += bid_price
+            interval_bid_count += 1
             
-            # Auction Logic (Second Price or First Price? Spec implies "bid >= winner_price")
-            # We'll assume First Price for simplicity or just "pay winner price" (Second Price).
-            # "Winner price" in logs is usually the clearing price.
-            # So if bid >= winner_price, we win and pay winner_price.
+            # Logic: First Price Auction
+            # We assume bid_price is the actual cost for this single impression.
+            # Winner price in the data is the market floor price (others' max bid).
+            # Win condition: My Bid >= Market Winner Price
+            # Cost: My Bid
             
-            is_win = bid_price_cpm >= row['winner_price']
+            is_win = bid_price >= row['winner_price']
             cost = 0.0
             
             if is_win:
-                cost = row['winner_price'] / 1000.0 # CPM to single imp cost
+                # First Price Auction: Pay what you bid
+                # (Or Second Price: Pay winner_price + epsilon? But usually simulation uses First Price or just Pay Bid for simplicity/risk)
+                # Given user query: "cost is strategy bid price", implying First Price Auction logic.
+                cost = bid_price 
+                
                 if remaining_budget >= cost:
                     remaining_budget -= cost
                     win_count += 1
@@ -100,19 +104,26 @@ class ReplayEngine(IReplayEngine):
 
             # Record history periodically (every 100 or so) to save memory
             if index % 50 == 0:
+                # New: Calculate average bid for this interval
+                avg_bid = interval_bid_sum / interval_bid_count if interval_bid_count > 0 else 0.0
+                
                 history.append({
                     "timestamp": current_time,
                     "remaining_budget": remaining_budget,
                     "win_count": win_count,
                     "conversion_count": conversion_count,
-                    "total_spend": total_spend
+                    "total_spend": total_spend,
+                    "avg_bid_price": avg_bid # Add to history
                 })
+                
+                # Reset counters
+                interval_bid_sum = 0.0
+                interval_bid_count = 0
 
         # Final Metrics
         win_rate = win_count / bids_placed if bids_placed > 0 else 0
         avg_cpm = (total_spend * 1000 / win_count) if win_count > 0 else 0
         avg_cpa = (total_spend / conversion_count) if conversion_count > 0 else 0
-        roi = (conversion_count * 10.0 - total_spend) / total_spend if total_spend > 0 else 0 # Assuming $10 value per conversion
         
         return {
             "win_count": win_count,
@@ -123,7 +134,6 @@ class ReplayEngine(IReplayEngine):
             "remaining_budget": remaining_budget,
             "avg_cpm": avg_cpm,
             "avg_cpa": avg_cpa,
-            "roi": roi,
             "history": history
         }
 

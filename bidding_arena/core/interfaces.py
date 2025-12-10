@@ -47,6 +47,11 @@ class ILLMClient(ABC):
         pass
 
     @abstractmethod
+    def generate_text(self, prompt: str) -> str:
+        """Generates raw text based on a prompt."""
+        pass
+
+    @abstractmethod
     def analyze_strategies(self, strategies_data: List[Dict[str, Any]]) -> str:
         """Analyzes a list of strategies and returns insights."""
         pass

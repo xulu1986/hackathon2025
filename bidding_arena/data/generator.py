@@ -10,17 +10,34 @@ class MockDataGenerator(IDataGenerator):
     def __init__(self, start_time: int = 1700000000):
         self.start_time = start_time
         
-    def generate_data(self, num_records: int = 1000) -> pd.DataFrame:
-        """Generates a DataFrame of synthetic bid logs."""
+    def generate_data(self, num_records: int = 1000, total_budget: float = 1000.0) -> pd.DataFrame:
+        """Generates a DataFrame of synthetic bid logs.
+        
+        Adjusts the number of records or data such that the sum of winner prices (cost to win all)
+        is approximately 80% of the total budget.
+        """
         
         platforms = ['iOS', 'Android']
         geos = ['US', 'EU', 'APAC']
         placements = ['Banner', 'Video', 'Interstitial']
         
+        # Target total cost logic:
+        # We assume 'winner_price' is the actual cost to win one impression (First Price Auction).
+        # We want the sum of all winner prices to be approximately 80% of the total budget.
+        # This ensures scarcity: the budget can cover most but not all opportunities.
+        target_total_cost = total_budget * 0.8
+        
         data = []
         current_time = self.start_time
+        current_total_cost = 0.0
         
-        for _ in range(num_records):
+        # Safety break: Allow enough records to likely fill the budget
+        # We need roughly budget / min_avg_price records.
+        # Let's be safe and allow max(500,000, budget * 10)
+        max_records = max(500000, int(total_budget * 10)) 
+        
+        count = 0
+        while current_total_cost < target_total_cost and count < max_records:
             # Time advances slightly
             current_time += random.randint(1, 5)
             
@@ -34,8 +51,28 @@ class MockDataGenerator(IDataGenerator):
             if placement == 'Video': base_price *= 3.0
             if platform == 'iOS': base_price *= 1.2
             
-            # Winner price (log-normal distribution)
+            # Winner price: Sample from log-normal distribution
+            # This implicitly forms a distribution that has percentiles.
+            # The 'winner_price_percentiles' passed to strategy are calculated FROM this generated data.
+            # So if we generate using lognormal, the percentiles will reflect lognormal.
+            # To ensure the winner price is "sampled from percentiles", we just need to ensure consistency.
+            # The current approach (Generate -> Calculate Percentiles -> Pass to Strategy) is correct
+            # because the strategy sees the percentiles of the *actual* historical data (which is what we are generating here).
+            
+            # However, if the user implies we should sample from a *pre-defined* percentile distribution,
+            # that's a different requirement. Assuming the current flow:
+            # 1. Generate History (this function)
+            # 2. Calculate Stats from History (get_percentiles)
+            # 3. Pass Stats to Strategy
+            # This is consistent.
+            
             winner_price = np.random.lognormal(mean=np.log(base_price), sigma=0.5)
+            
+            # Ensure winner_price is strictly positive
+            winner_price = max(0.01, winner_price)
+            
+            # Cost for this single impression (Directly use price, no CPM division, per user request)
+            cost = winner_price
             
             # Conversion probability
             cv_prob = 0.01
@@ -54,6 +91,8 @@ class MockDataGenerator(IDataGenerator):
                 'segment_id': f"{platform}_{geo}_{placement}"
             }
             data.append(record)
+            current_total_cost += cost
+            count += 1
             
         return pd.DataFrame(data)
 

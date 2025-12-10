@@ -5,7 +5,7 @@ class PromptBuilder:
     def build(strategy_type: StrategyType) -> str:
         base_prompt = """
 You are an expert in RTB (Real-Time Bidding) algorithms.
-Your goal is to write a Python function `bidding_strategy` that determines the bid price (CPM) for an ad request.
+Your goal is to write a Python function `bidding_strategy` that determines the bid price for an ad request.
 
 ### Function Signature
 ```python
@@ -16,9 +16,9 @@ def bidding_strategy(
     total_duration: int,             # Total duration (seconds)
     remaining_budget: float,         # Remaining budget
     remaining_time: int,             # Remaining time (seconds)
-    winner_price_percentiles: dict,  # {10: p10, ..., 50: median, ..., 90: p90} (CPM)
+    winner_price_percentiles: dict,  # {10: p10, ..., 50: median, ..., 90: p90} (Market Price)
     conversion_rate: float           # Historical conversion rate (0.0 to 1.0)
-) -> float:                          # Return bid price (CPM, USD)
+) -> float:                          # Return bid price (USD)
 ```
 
 ### Constraints
@@ -68,4 +68,66 @@ def bidding_strategy(
         }
 
         return base_prompt + specific_instructions.get(strategy_type, "") + "\n\nRETURN ONLY THE CODE."
+
+    @staticmethod
+    def build_analysis_prompt(strategy_code: str, metrics: dict) -> str:
+        return f"""
+You are a senior data scientist specializing in AdTech and Bidding Strategies.
+Analyze the following bidding strategy code and its performance metrics.
+
+### Strategy Code
+```python
+{strategy_code}
+```
+
+### Performance Metrics
+{metrics}
+
+### Task
+Identify 2-3 key strengths and 2-3 weaknesses of this strategy based on the metrics.
+Explain WHY it performed this way (e.g., did it bid too high and run out of budget? did it bid too low and miss conversions?).
+Provide concrete suggestions for improvement.
+
+### Guidelines
+- **Be concise and professional.**
+- **STRICTLY limit your response to under 50 words.**
+- **Use short bullet points only.**
+- **NO background information** (e.g., "RTB is...").
+- **NO filler text.**
+- Focus strictly on interpreting the data and code logic.
+"""
+
+    @staticmethod
+    def build_optimization_prompt(original_code: str, analysis: str) -> str:
+         return f"""
+You are an expert Python developer for Real-Time Bidding systems.
+Your task is to REWRITE the following bidding strategy to improve its performance, based on the provided analysis.
+
+### Original Strategy
+```python
+{original_code}
+```
+
+### Analysis & Recommendations
+{analysis}
+
+### Requirements
+1.  **Goal**: Maximize Conversions (Total number of conversions) while managing budget.
+2.  **Function Signature**: MUST match the original signature exactly:
+```python
+def bidding_strategy(
+    initial_budget: float,
+    total_duration: int,
+    remaining_budget: float,
+    remaining_time: int,
+    winner_price_percentiles: dict,
+    conversion_rate: float
+) -> float:
+```
+3.  **Constraints**: 
+    - Use ONLY `math` library.
+    - Run in < 1ms.
+    - Bid >= 0.
+4.  **Output**: ONLY the Python code for the function `bidding_strategy`. No markdown, no comments outside the code.
+"""
 
