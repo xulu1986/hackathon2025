@@ -321,9 +321,32 @@ def perform_optimization(use_ollama, model_name, initial_budget, source_results,
             "total_spend": f"${res['total_spend']:.2f}"
         }
         
+        # Build history context
+        history_context = ""
+        # Extract base name to find lineage (e.g. "Impression-Focused" from "Impression-Focused (Round 1)")
+        # Note: Custom strategies also follow this pattern if we consistently name them.
+        # But initial strategies are just "Impression-Focused".
+        # Optimization appends "(Round X)".
+        # We need a robust way to match base names.
+        
+        # Simple heuristic: remove " (Round X)" suffix
+        import re
+        base_name = re.sub(r" \(Round \d+\)$", "", strategy_name)
+        
+        # Find all previous results for this strategy lineage
+        all_res = st.session_state['results']
+        # Filter for strategies that start with the base name AND have a round number < current round
+        lineage = [r for r in all_res if r['strategy_name'].startswith(base_name) and r.get('round', 0) < round_num]
+        lineage.sort(key=lambda x: x.get('round', 0))
+        
+        history_context = f"History of '{base_name}' evolution:\n"
+        for l in lineage:
+            r_num = l.get('round', 0)
+            history_context += f"- Round {r_num}: Win Rate={l['win_rate']:.2%}, CPA=${l['avg_cpa']:.2f}, Conversions={l['conversion_count']}\n"
+
         try:
-            # Analyze & Optimize
-            _, new_meta = generator.analyze_and_optimize(res['metadata'], metrics_summary)
+            # Analyze & Optimize with History Context
+            _, new_meta = generator.analyze_and_optimize(res['metadata'], metrics_summary, history_context)
             
             # Run Simulation
             opt_strategy = DynamicStrategy(new_meta)
@@ -406,11 +429,30 @@ def display_global_charts(results):
                 })
             df_chart = pd.DataFrame(chart_data)
             
-            fig_bar = go.Figure(data=[
-                go.Bar(name='Win Rate', x=df_chart['Strategy'], y=df_chart['Win Rate']),
-                go.Bar(name='Conversions', x=df_chart['Strategy'], y=df_chart['Conversions'])
-            ])
-            fig_bar.update_layout(barmode='group')
+            # Create figure with secondary y-axis
+            from plotly.subplots import make_subplots
+            fig_bar = make_subplots(specs=[[{"secondary_y": True}]])
+            
+            # Add Win Rate bar (Left Axis)
+            fig_bar.add_trace(
+                go.Bar(name='Win Rate', x=df_chart['Strategy'], y=df_chart['Win Rate'], offsetgroup=1),
+                secondary_y=False,
+            )
+            
+            # Add Conversions bar (Right Axis)
+            fig_bar.add_trace(
+                go.Bar(name='Conversions', x=df_chart['Strategy'], y=df_chart['Conversions'], offsetgroup=2),
+                secondary_y=True,
+            )
+            
+            # Layout adjustments
+            fig_bar.update_layout(
+                barmode='group',
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+            )
+            fig_bar.update_yaxes(title_text="Win Rate", secondary_y=False, tickformat=".0%")
+            fig_bar.update_yaxes(title_text="Conversions", secondary_y=True)
+            
             st.plotly_chart(fig_bar, use_container_width=True)
 
 if __name__ == "__main__":

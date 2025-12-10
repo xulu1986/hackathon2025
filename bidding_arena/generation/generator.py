@@ -38,13 +38,13 @@ class StrategyGenerator:
         
         raise ValueError(f"Failed to generate valid strategy for {strategy_type.value} after {retries} attempts. Last error: {last_error}")
 
-    def analyze_and_optimize(self, strategy: StrategyMetadata, metrics: dict, retries: int = 3) -> tuple[str, StrategyMetadata]:
+    def analyze_and_optimize(self, strategy: StrategyMetadata, metrics: dict, history_context: str = "", retries: int = 3) -> tuple[str, StrategyMetadata]:
         # 1. Analyze
         analysis_prompt = PromptBuilder.build_analysis_prompt(strategy.code, metrics)
         analysis = self.llm_client.generate_text(analysis_prompt)
         
         # 2. Optimize
-        optimize_prompt = PromptBuilder.build_optimization_prompt(strategy.code, analysis)
+        optimize_prompt = PromptBuilder.build_optimization_prompt(strategy.code, analysis, history_context)
         
         last_error = None
         for i in range(retries):

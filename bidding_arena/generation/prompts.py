@@ -98,17 +98,20 @@ Provide concrete suggestions for improvement.
 """
 
     @staticmethod
-    def build_optimization_prompt(original_code: str, analysis: str) -> str:
+    def build_optimization_prompt(original_code: str, analysis: str, history_context: str = "") -> str:
          return f"""
 You are an expert Python developer for Real-Time Bidding systems.
 Your task is to REWRITE the following bidding strategy to improve its performance, based on the provided analysis.
 
-### Original Strategy
+### History of Strategy Evolution
+{history_context}
+
+### Original Strategy (Latest Version)
 ```python
 {original_code}
 ```
 
-### Analysis & Recommendations
+### Analysis & Recommendations (Latest Version)
 {analysis}
 
 ### Requirements
