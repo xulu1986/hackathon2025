@@ -321,15 +321,7 @@ def perform_optimization(use_ollama, model_name, initial_budget, source_results,
             "total_spend": f"${res['total_spend']:.2f}"
         }
         
-        # Build history context
-        history_context = ""
-        # Extract base name to find lineage (e.g. "Impression-Focused" from "Impression-Focused (Round 1)")
-        # Note: Custom strategies also follow this pattern if we consistently name them.
-        # But initial strategies are just "Impression-Focused".
-        # Optimization appends "(Round X)".
-        # We need a robust way to match base names.
-        
-        # Simple heuristic: remove " (Round X)" suffix
+        # Build history context AND find best previous version
         import re
         base_name = re.sub(r" \(Round \d+\)$", "", strategy_name)
         
@@ -340,13 +332,50 @@ def perform_optimization(use_ollama, model_name, initial_budget, source_results,
         lineage.sort(key=lambda x: x.get('round', 0))
         
         history_context = f"History of '{base_name}' evolution:\n"
+        
+        best_candidate = res # Default to current
+        best_metric = res['conversion_count']
+        
         for l in lineage:
             r_num = l.get('round', 0)
-            history_context += f"- Round {r_num}: Win Rate={l['win_rate']:.2%}, CPA=${l['avg_cpa']:.2f}, Conversions={l['conversion_count']}\n"
+            # Use Conversions as the primary metric for 'Best' selection
+            metric_val = l['conversion_count']
+            if metric_val > best_metric:
+                best_metric = metric_val
+                best_candidate = l
+                
+            # Take a generous snippet or even full code if token limit allows. 
+            code_content = l['metadata'].code
+            if len(code_content) > 500:
+                code_content = code_content[:500] + "...(truncated)"
+            
+            history_context += f"--- Round {r_num} ---\n"
+            history_context += f"Metrics: Win Rate={l['win_rate']:.2%}, CPA=${l['avg_cpa']:.2f}, Conversions={l['conversion_count']}\n"
+            history_context += f"Code:\n```python\n{code_content}\n```\n\n"
+
+        # Prepare metrics of the BEST candidate to analyze
+        metrics_summary = {
+            "win_rate": f"{best_candidate['win_rate']:.2%}",
+            "avg_cpm": f"${best_candidate['avg_cpm']:.2f}",
+            "total_spend": f"${best_candidate['total_spend']:.2f}",
+            "conversions": best_candidate['conversion_count']
+        }
+        
+        # Add a note to history context telling LLM we are reverting if needed
+        # Note: 'res' is the strategy from the PREVIOUS round (the one we selected to optimize).
+        # If best_candidate is NOT res, it means an earlier round was better.
+        if best_candidate['strategy_name'] != res['strategy_name']:
+            history_context += f"\nNOTE: The latest version (Round {res.get('round',0)}) performed worse than Round {best_candidate.get('round',0)}. We are automatically REVERTING to Round {best_candidate.get('round',0)} as the base for this new optimization to recover performance.\n"
+
+        # --- NEW: Re-roll Mechanism ---
+        # Threshold: If conversions are extremely low (e.g. < 10), consider it a failed lineage.
+        if best_candidate['conversion_count'] < 10:
+            history_context += "\nCRITICAL ALERT: This strategy lineage has consistently failed to generate meaningful conversions. DISCARD the previous logic. Generate a COMPLETELY NEW and AGGRESSIVE strategy from scratch to break this deadlock.\n"
+        # ------------------------------
 
         try:
-            # Analyze & Optimize with History Context
-            _, new_meta = generator.analyze_and_optimize(res['metadata'], metrics_summary, history_context)
+            # Analyze & Optimize using the BEST candidate
+            _, new_meta = generator.analyze_and_optimize(best_candidate['metadata'], metrics_summary, history_context)
             
             # Run Simulation
             opt_strategy = DynamicStrategy(new_meta)

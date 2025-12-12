@@ -116,7 +116,8 @@ Your task is to REWRITE the following bidding strategy to improve its performanc
 
 ### Requirements
 1.  **Goal**: Maximize Conversions (Total number of conversions) while managing budget.
-2.  **Function Signature**: MUST match the original signature exactly:
+2.  **Adaptation Strategy**: If previous performance was poor (e.g., extremely low budget utilization or negligible conversions), perform a RADICAL architectural change rather than minor tweaks.
+3.  **Function Signature**: MUST match the original signature exactly:
 ```python
 def bidding_strategy(
     initial_budget: float,
@@ -127,10 +128,10 @@ def bidding_strategy(
     conversion_rate: float
 ) -> float:
 ```
-3.  **Constraints**: 
+4.  **Constraints**: 
     - Use ONLY `math` library.
     - Run in < 1ms.
     - Bid >= 0.
-4.  **Output**: ONLY the Python code for the function `bidding_strategy`. No markdown, no comments outside the code.
+5.  **Output**: ONLY the Python code for the function `bidding_strategy`. No markdown, no comments outside the code.
 """
 
